@@ -22,6 +22,17 @@ plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False  # 解决负号显示问题
 warnings.filterwarnings("ignore")  # 忽略警告，保证输出干净
 
+# ====================== 【关键修复1】全局 task_wrapper ======================
+# 移到全局，彻底解决序列化报错
+def task_wrapper(args):
+    s, e, folder_path, file_list, save_folder = args
+    try:
+        runBatchProcess(folder_path, file_list, save_folder, s, e)
+        print(f'🟩 批次 [{s} ~ {e}] 处理完成')
+    except Exception as exc:
+        print(f'⚠️ 批次 {s}-{e} 执行失败：{str(exc)}')
+        logError(save_folder, s, e, 0, exc)
+
 # ------------------------------------------------------------------------------
 # 主程序入口（Docker 环境专用，路径固定）
 # 功能：遍历 /data 下的 wav 文件，按批次并行处理，生成时域图、LOFAR、DEMON、CMS 图谱
@@ -50,7 +61,6 @@ def main():
     batchEnds = [min(s + batchSize - 1, len(file_list)) for s in batchStarts]
     totalBatches = len(batchStarts)
 
-    # 修正打印文案：当前为多核并行模式
     print(f'\n📊 并行处理任务开始，总批次数: {totalBatches}')
 
     # 初始化错误日志
@@ -58,42 +68,30 @@ def main():
     with open(logFile, 'w', encoding='utf-8') as f:
         f.write(f'==== 错误日志开始 {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ====\n')
 
-    # 构造批次列表，用于多进程分发任务
-    batch_task_list = list(zip(batchStarts, batchEnds))
+    # ====================== 【关键修复2】构造完整参数 ======================
+    task_args = [
+        (s, e, folder_path, file_list, save_folder)
+        for s, e in zip(batchStarts, batchEnds)
+    ]
 
-    # 定义单批次任务包装函数
-    def task_wrapper(batch_info):
-        s, e = batch_info
-        try:
-            runBatchProcess(folder_path, file_list, save_folder, s, e)
-            print(f'🟩 批次 [{s} ~ {e}] 处理完成')
-        except Exception as e:
-            print(f'⚠️ 批次 {s}-{e} 执行失败：{str(e)}')
-            logError(save_folder, s, e, 0, e)
-
-    # 根据服务器CPU核心数设置进程数，上限60，适配64核服务器
-    process_num = min(mp.cpu_count(), 60)
+    # 根据服务器CPU核心数设置进程数，上限16，避免资源超限
+    process_num = min(mp.cpu_count(), 16)
     print(f"🚀 启用进程数：{process_num}")
 
-    # 创建进程池并执行并行任务
-    pool = mp.Pool(processes=process_num)
-    pool.map(task_wrapper, batch_task_list)
-    pool.close()
-    pool.join()
+    # ====================== 【关键修复3】标准进程池写法 ======================
+    with mp.Pool(process_num) as pool:
+        pool.map(task_wrapper, task_args)
 
     print('\n✅ 全部批次处理完成！')
 
 # ------------------------------------------------------------------------------
-# 核心处理函数
-# 功能：读取一批音频文件 → 归一化 → 绘图 → FIR滤波 → LOFAR/DEMON/CMS分析
+# 核心处理函数（完全保留原功能）
 # ------------------------------------------------------------------------------
 def runBatchProcess(folderPath, fileNames, saveFolder, batchStart, batchEnd):
     maxRetries = 1  # 每批次最多重试1次
     attempt = 0
     success = False
-    tStart = time.time()
 
-    # 失败重试机制
     while not success and attempt <= maxRetries:
         attempt += 1
         try:
@@ -417,5 +415,7 @@ def plotTimeDomainSignalSafe(timeSec, dataVec, startTime, batchStart, batchEnd):
     plt.ylabel('幅度/v')
     return fig
 
+# ====================== 【关键修复4】适配Docker/国产服务器 ======================
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     main()
